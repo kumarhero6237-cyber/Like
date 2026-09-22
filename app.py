@@ -113,19 +113,76 @@ def _account_file_path(server_name: str) -> str:
 
 
 def _load_accounts_for_server(server_name: str) -> list:
+    """Load guest UID/password pairs from either:
+    - JSON: {"IND": ["uid=...&password=...", ...]}
+    - text: uid:password
+    - text/query format: uid=...&password=...
+    """
     path = _account_file_path(server_name)
     if not path or not os.path.exists(path):
         return []
+
     out = []
-    with open(path, "r", encoding="utf-8") as f:
-        for ln in f:
-            ln = ln.strip()
-            if not ln or ln.startswith("#") or ":" not in ln:
-                continue
-            uid, pw = ln.split(":", 1)
-            uid, pw = uid.strip(), pw.strip()
-            if uid and pw:
-                out.append((uid, pw))
+
+    def add_pair(uid, pw):
+        uid = str(uid or "").strip()
+        pw = str(pw or "").strip()
+        if uid and pw:
+            pair = (uid, pw)
+            if pair not in out:
+                out.append(pair)
+
+    def parse_line(value):
+        value = str(value or "").strip()
+        if not value or value.startswith("#"):
+            return
+        # uid=123&password=abc
+        if "uid=" in value.lower() and "password=" in value.lower():
+            try:
+                from urllib.parse import parse_qs
+                q = parse_qs(value.lstrip("?"), keep_blank_values=True)
+                uid = q.get("uid", [""])[0]
+                pw = q.get("password", [""])[0]
+                add_pair(uid, pw)
+                return
+            except Exception:
+                pass
+        # uid:password
+        if ":" in value:
+            uid, pw = value.split(":", 1)
+            add_pair(uid, pw)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+
+        # Prefer JSON when the account file is JSON.
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                values = data.get(server_name.upper()) or data.get(server_name.lower()) or []
+            else:
+                values = data
+            if isinstance(values, list):
+                for item in values:
+                    if isinstance(item, str):
+                        parse_line(item)
+                    elif isinstance(item, dict):
+                        add_pair(item.get("uid"), item.get("password") or item.get("pass"))
+            elif isinstance(values, dict):
+                for uid, pw in values.items():
+                    add_pair(uid, pw)
+            if out:
+                return out
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+        # Backward-compatible text format.
+        for ln in raw.splitlines():
+            parse_line(ln)
+    except OSError:
+        return []
+
     return out
 
 
